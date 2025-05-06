@@ -174,7 +174,7 @@ def fit_attention_model(
     gpus = tf.config.list_physical_devices("GPU")
     print(f"🖥️  TensorFlow sees {len(gpus)} GPU(s): {[g.name for g in gpus]}")
 
-    cw = compute_class_weight("balanced", classes=[0, 1], y=y_train_res)
+    cw = compute_class_weight("balanced", classes=np.array([0, 1]), y=y_train_res)
     cw_dict = {0: cw[0], 1: cw[1]}
 
     tuner = kt.RandomSearch(
