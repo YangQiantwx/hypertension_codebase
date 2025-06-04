@@ -1,0 +1,18 @@
+# Ignore virtual environments
+tf210_env/
+processed/
+hp/
+feature_attention_tuner/
+
+# Ignore Python cache files
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+
+# Ignore datasets or large files
+*.csv
+*.xlsx
+
+# Ignore system files
+.DS_Store
+Thumbs.db
