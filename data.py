@@ -1,4 +1,3 @@
-# data.py
 """
 Data loading, preprocessing, scaling, and resampling utilities.
 """
@@ -47,13 +46,14 @@ def load_data(
     train_days: int = 20,
     sampling_strategy: float = 0.50,
     random_state: int = 42,
+    use_adasyn: bool = True,
 ):
     """
     Returns
     -------
     X_train, y_train               – raw feature frames
     X_test,  y_test
-    X_train_res, y_train_res       – **scaled + ADASYN‑balanced** tensors
+    X_train_res, y_train_res       – **scaled + (optional) ADASYN-balanced** tensors
     X_test_scaled
     scaler
     """
@@ -75,13 +75,18 @@ def load_data(
     X_train, y_train = train_df[features], train_df[TARGET]
     X_test, y_test = test_df[features], test_df[TARGET]
 
-    # scale + ADASYN
+    # scale
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    adasyn = ADASYN(sampling_strategy=sampling_strategy, random_state=random_state)
-    X_train_res, y_train_res = adasyn.fit_resample(X_train_s, y_train)
+    # optionally apply ADASYN
+    if use_adasyn:
+        adasyn = ADASYN(sampling_strategy=sampling_strategy, random_state=random_state)
+        X_train_res, y_train_res = adasyn.fit_resample(X_train_s, y_train)
+    else:
+        # no oversampling → use the scaled data “as is”
+        X_train_res, y_train_res = X_train_s, y_train
 
     return (
         X_train,
