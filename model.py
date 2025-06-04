@@ -33,7 +33,7 @@ xgb.set_config(verbosity=0)
 # --------------------------------------------------------------------------- #
 def build_xgb_pipeline(
     scale_pos_weight: float,
-    sampling_strategy: float = 0.50,
+    sampling_strategy: float = 0.60,
     max_depth: int = 5,
     learning_rate: float = 0.05,
     n_estimators: int = 150,
