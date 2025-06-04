@@ -1,4 +1,4 @@
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 import os
 import random
 
@@ -29,53 +29,57 @@ tf.keras.utils.set_random_seed(SEED)
 xgb.set_config(verbosity=0)
 
 # --------------------------------------------------------------------------- #
-# 1.  XGBoost (fixed‑hyper‑param, fast baseline)
+# 1.  XGBoost (fixed-hyper-param, fast baseline)
 # --------------------------------------------------------------------------- #
 def build_xgb_pipeline(
     scale_pos_weight: float,
-    sampling_strategy: float = 0.50,
+    sampling_strategy: Optional[float] = 0.60,  # if None → skip ADASYN
     max_depth: int = 5,
     learning_rate: float = 0.05,
     n_estimators: int = 150,
-    n_jobs: int = -1,          # use all CPU cores by default
+    n_jobs: int = -1,
     random_state: int = SEED,
 ):
-    """One‑shot XGB classifier wrapped in StandardScaler ➔ ADASYN."""
-    return ImbPipeline(
-        [
-            ("scaler", StandardScaler()),
-            (
-                "adasyn",
-                ADASYN(sampling_strategy=sampling_strategy, random_state=random_state),
+    """
+    One-shot XGB classifier wrapped in (StandardScaler → [optional ADASYN] → XGBClassifier).
+    If sampling_strategy is None, the ADASYN step is omitted.
+    """
+    steps = [("scaler", StandardScaler())]
+    if sampling_strategy is not None:
+        steps.append(("adasyn", ADASYN(sampling_strategy=sampling_strategy, random_state=random_state)))
+    steps.append(
+        (
+            "xgb",
+            xgb.XGBClassifier(
+                random_state=random_state,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                n_estimators=n_estimators,
+                scale_pos_weight=scale_pos_weight,
+                n_jobs=n_jobs,
             ),
-            (
-                "xgb",
-                xgb.XGBClassifier(
-                    random_state=random_state,
-                    max_depth=max_depth,
-                    learning_rate=learning_rate,
-                    n_estimators=n_estimators,
-                    scale_pos_weight=scale_pos_weight,
-                    n_jobs=n_jobs,
-                ),
-            ),
-        ]
+        )
     )
+    return ImbPipeline(steps)
 
 
 # --------------------------------------------------------------------------- #
-# 2.  XGBoost + GridSearchCV  (faithful to the original notebook)
+# 2.  XGBoost + GridSearchCV  (search over ADASYN sampling + XGB hyperparams)
 # --------------------------------------------------------------------------- #
 def fit_xgb_with_grid(
     X_train,
     y_train,
     scale_pos_weight: float,
-    sampling_strategy: float = 0.50,
+    sampling_strategy: float = 0.50,  # serves as a default, but grid overrides
     n_jobs: int = -1,
     random_state: int = SEED,
 ):
     """
-    Recreates the original 3‑fold grid search over depth / LR / n_estimators.
+    Recreates the original 3-fold grid search over:
+      - adasyn__sampling_strategy ∈ {0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70}
+      - xgb__max_depth ∈ {3, 5, 7}
+      - xgb__learning_rate ∈ {0.01, 0.05, 0.1}
+      - xgb__n_estimators ∈ {100, 150, 200}
     Returns the best estimator already fitted.
     """
     print("\n⚙️  XGBoost grid search …")
@@ -84,17 +88,19 @@ def fit_xgb_with_grid(
         [
             ("scaler", StandardScaler()),
             ("adasyn", ADASYN(sampling_strategy=sampling_strategy, random_state=random_state)),
-            ("xgb", xgb.XGBClassifier(random_state=random_state,
-                                      scale_pos_weight=scale_pos_weight,
-                                      n_jobs=n_jobs)),
+            ("xgb", xgb.XGBClassifier(
+                random_state=random_state,
+                scale_pos_weight=scale_pos_weight,
+                n_jobs=n_jobs,
+            )),
         ]
     )
 
     param_grid = {
+        "adasyn__sampling_strategy": [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
         "xgb__max_depth": [3, 5, 7],
         "xgb__learning_rate": [0.01, 0.05, 0.1],
         "xgb__n_estimators": [100, 150, 200],
-        "adasyn__sampling_strategy": [sampling_strategy],  # keep constant
     }
 
     gs = GridSearchCV(
@@ -112,7 +118,7 @@ def fit_xgb_with_grid(
 
 
 # --------------------------------------------------------------------------- #
-# 3.  Feature‑attention network (tabular Transformer‑lite)
+# 3.  Feature-attention network (tabular Transformer-lite)
 # --------------------------------------------------------------------------- #
 class FeatureAttentionHyperModel(kt.HyperModel):
     def __init__(self, input_dim: int):
@@ -122,16 +128,22 @@ class FeatureAttentionHyperModel(kt.HyperModel):
         inputs = Input(shape=(self.input_dim,))
 
         # ── First dense block ─────────────────────────────────────────
-        x = Dense(hp.Int("dense1", 64, 256, step=64), activation="relu")(inputs)
-        x = Dropout(hp.Float("drop1", 0.2, 0.5, step=0.1))(x)
+        x = Dense(
+            hp.Choice("dense1", [32, 64, 128, 256]),
+            activation="relu"
+        )(inputs)
+        x = Dropout(hp.Float("drop1", 0.1, 0.5, step=0.1))(x)
 
         # ── Second dense block ────────────────────────────────────────
-        x = Dense(hp.Int("dense2", 32, 128, step=32), activation="relu")(x)
-        x = Dropout(hp.Float("drop2", 0.2, 0.5, step=0.1))(x)
+        x = Dense(
+            hp.Choice("dense2", [16, 32, 64, 128]),
+            activation="relu"
+        )(x)
+        x = Dropout(hp.Float("drop2", 0.1, 0.5, step=0.1))(x)
 
         # ── Attention hyperparameters: num_heads & key_dim ─────────────
-        num_heads = hp.Int("num_heads", 1, 4, step=1)
-        key_dim = hp.Int("key_dim", 8, 32, step=8)
+        num_heads = hp.Choice("num_heads", [1, 2, 4, 8])
+        key_dim = hp.Choice("key_dim", [4, 8, 16, 32])
         x_exp = tf.expand_dims(x, axis=1)
         x_attn = tf.keras.layers.MultiHeadAttention(
             num_heads=num_heads,
@@ -141,14 +153,14 @@ class FeatureAttentionHyperModel(kt.HyperModel):
 
         # ── Final dense + regularization ───────────────────────────────
         x = Dense(
-            hp.Int("final", 16, 64, step=16),
+            hp.Choice("final", [16, 32, 64, 128]),
             activation="relu",
-            kernel_regularizer=l2(hp.Choice("reg", [0.0, 0.001, 0.01]))
+            kernel_regularizer=l2(hp.Choice("reg", [0.0, 1e-4, 1e-3, 1e-2]))
         )(x_pool)
-        x = Dropout(hp.Float("drop3", 0.2, 0.5, step=0.1))(x)
+        x = Dropout(hp.Float("drop3", 0.1, 0.5, step=0.1))(x)
 
         # ── Output & compile ──────────────────────────────────────────
-        lr = hp.Choice("lr", [1e-3, 5e-4, 1e-4])
+        lr = hp.Choice("lr", [1e-2, 5e-3, 1e-3, 5e-4, 1e-4, 5e-5])
         outputs = Dense(1, activation="sigmoid")(x)
         model = Model(inputs, outputs)
         model.compile(
@@ -170,7 +182,7 @@ def fit_attention_model(
     batch_size: int = 32,
     verbose: int = 1,
 ) -> Tuple[Model, Dict[str, Any]]:
-    """Hyper‑parameter search wrapper with deterministic seeding."""
+    """Hyper-parameter search wrapper with deterministic seeding."""
     gpus = tf.config.list_physical_devices("GPU")
     print(f"🖥️  TensorFlow sees {len(gpus)} GPU(s): {[g.name for g in gpus]}")
 
@@ -204,7 +216,7 @@ def fit_attention_model(
 # 4.  Registry – lets train.py pick models by tag
 # --------------------------------------------------------------------------- #
 MODEL_REGISTRY: Dict[str, Any] = {
-    "xgb": fit_xgb_with_grid,     # grid‑search variant
+    "xgb": fit_xgb_with_grid,     # grid-search variant
     "xgb_fixed": build_xgb_pipeline,
     "attn": fit_attention_model,
 }

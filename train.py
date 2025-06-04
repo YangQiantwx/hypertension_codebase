@@ -15,17 +15,15 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import List
 
 import matplotlib.pyplot as plt
 import numpy as np
-import shap
 import tensorflow as tf
 from sklearn.metrics import confusion_matrix
 
 from data import DEFAULT_FEATURES, load_data
 from evaluation import ensemble_search, threshold_sweep
-from model import MODEL_REGISTRY
+from model import MODEL_REGISTRY, build_xgb_pipeline, fit_xgb_with_grid
 
 # ── GLOBAL SEED for deterministic runs ───────────────────────────────────────
 SEED = 42
@@ -70,6 +68,11 @@ def parse_args() -> argparse.Namespace:
                    help="Batch size for attention net.")
     p.add_argument("--verbose", type=int, default=1, choices=[0, 1, 2],
                    help="Keras-fit verbosity level.")
+    p.add_argument(
+        "--no_adasyn",
+        action="store_true",
+        help="If set, do NOT use ADASYN in any pipeline. (i.e., skip oversampling.)"
+    )
     return p.parse_args()
 
 def main() -> None:
@@ -79,7 +82,7 @@ def main() -> None:
     out_folder = args.csv.parent
     out_folder.mkdir(parents=True, exist_ok=True)
 
-    # Load data
+    # ── Load data ───────────────────────────────────────────────────────────
     (
         X_train,
         y_train,
@@ -96,37 +99,60 @@ def main() -> None:
         train_days=args.train_days,
         sampling_strategy=0.50,
         random_state=SEED,
+        use_adasyn=(not args.no_adasyn),
     )
 
     pos, neg = int(np.sum(y_train == 1)), int(np.sum(y_train == 0))
     spw = neg / pos
     print(f"\n🔹 Train positives={pos}  negatives={neg}  scale_pos_weight={spw:4.2f}")
 
-    # Train models
+    # ── Train models ────────────────────────────────────────────────────────
     y_preds = []
     xgb_pipeline = None
 
     for tag in [m.strip() for m in args.models.split(",")]:
-        if tag in ("xgb", "xgb_fixed"):
-            print(f"\n⚙️  Training {tag} …")
-            if tag == "xgb":
-                model = MODEL_REGISTRY["xgb"](X_train, y_train, scale_pos_weight=spw)
-            else:
-                model = MODEL_REGISTRY["xgb_fixed"](scale_pos_weight=spw)
-                model.fit(X_train, y_train)
+        if tag == "xgb":
+            print(f"\n⚙️  XGBoost grid search …")
+            # If --no_adasyn, pass sampling_strategy=None → grid will not find adasyn step; 
+            # otherwise grid will iterate over [0.40 … 0.70].
+            sampling_arg = None if args.no_adasyn else 0.50
+            model = fit_xgb_with_grid(
+                X_train,
+                y_train,
+                scale_pos_weight=spw,
+                sampling_strategy=sampling_arg,  # grid-sweep inside
+                n_jobs=-1,
+                random_state=SEED,
+            )
+            y_pred_xgb_only = model.predict_proba(X_test)[:, 1]
+            from sklearn.metrics import roc_auc_score
+            print(f"🔹 Pure XGB Test-set AUC: {roc_auc_score(y_test, y_pred_xgb_only):.3f}")
 
-            # collect for ensemble
-            y_preds.append(model.predict_proba(X_test)[:, 1])
+            y_preds.append(y_pred_xgb_only)
             xgb_pipeline = model
 
-            # — Inserted: print pure XGBoost test-set AUC —
+        elif tag == "xgb_fixed":
+            print(f"\n⚙️  Training xgb_fixed …")
+            # If no_adasyn → sampling_strategy=None → skip ADASYN in pipeline
+            pipeline = build_xgb_pipeline(
+                scale_pos_weight=spw,
+                sampling_strategy=None if args.no_adasyn else 0.50,
+                max_depth=5,
+                learning_rate=0.05,
+                n_estimators=150,
+            )
+            pipeline.fit(X_train, y_train)
+            y_pred_fixed = pipeline.predict_proba(X_test)[:, 1]
             from sklearn.metrics import roc_auc_score
-            y_pred_xgb_only = model.predict_proba(X_test)[:, 1]
-            print(f"🔹 Pure XGB Test-set AUC: {roc_auc_score(y_test, y_pred_xgb_only):.3f}")
+            print(f"🔹 XGB_fixed Test-set AUC: {roc_auc_score(y_test, y_pred_fixed):.3f}")
+
+            y_preds.append(y_pred_fixed)
+            xgb_pipeline = pipeline
 
         elif tag == "attn":
             print("\n⚙️  Training attention model …")
-            model, best_hps = MODEL_REGISTRY["attn"](
+            # Note: X_train_res / y_train_res were created with or without ADASYN above
+            model_attn, best_hps = MODEL_REGISTRY["attn"](
                 X_train_res,
                 y_train_res,
                 X_test_s,
@@ -137,12 +163,13 @@ def main() -> None:
                 verbose=args.verbose,
             )
             print(f"   ⇢ best attention H-params: {best_hps}")
-            y_preds.append(model.predict(X_test_s).flatten())
+            y_pred_attn = model_attn.predict(X_test_s).flatten()
+            y_preds.append(y_pred_attn)
 
         else:
             sys.exit(f"❌ Unknown model tag '{tag}'.")
 
-    # Ensemble if two preds
+    # ── Ensemble if two preds ────────────────────────────────────────────────
     if len(y_preds) == 2:
         ens = ensemble_search(y_preds[0], y_preds[1], y_test)
         final_prob = ens["a"] * y_preds[0] + ens["b"] * y_preds[1]
@@ -150,7 +177,7 @@ def main() -> None:
     else:
         final_prob = y_preds[0]
 
-    # Threshold sweep & console print
+    # ── Threshold sweep & console print ─────────────────────────────────────
     best_thr = threshold_sweep(y_test, final_prob)
     print(
         f"\n✅  BEST THRESHOLD={best_thr['thr']:4.2f}  "
@@ -158,13 +185,13 @@ def main() -> None:
         f"(Youden={best_thr['youden']:4.3f})"
     )
 
-    # Sensitivity/Specificity plot → save in out_folder
+    # ── Sensitivity/Specificity plot → save in out_folder ───────────────────
     thr_grid = np.arange(0, 1.01, 0.01)
     sens_list, spec_list = [], []
     for t in thr_grid:
         tn, fp, fn, tp = confusion_matrix(y_test, (final_prob >= t).astype(int)).ravel()
-        sens_list.append(tp / (tp + fn) if tp + fn else 0)
-        spec_list.append(tn / (tn + fp) if tn + fp else 0)
+        sens_list.append(tp / (tp + fn) if (tp + fn) else 0)
+        spec_list.append(tn / (tn + fp) if (tn + fp) else 0)
 
     plt.figure(figsize=(8, 5))
     plt.plot(thr_grid, sens_list, label="Sensitivity", marker="o")
@@ -180,15 +207,15 @@ def main() -> None:
     plt.close()
     print(f"📸  Saved  ➜  {sens_path}")
 
-    # SHAP summary → save in out_folder
+    # ── SHAP summary → save in out_folder (if XGB was trained) ─────────────
     if xgb_pipeline is not None:
         scaler_xgb = xgb_pipeline.named_steps["scaler"]
         xgb_clf = xgb_pipeline.named_steps["xgb"]
         X_test_scaled_for_shap = scaler_xgb.transform(X_test)
 
+        import shap
         explainer = shap.Explainer(xgb_clf)
         shap_values = explainer(X_test_scaled_for_shap)
-        # do not show on screen, just save
         shap.summary_plot(
             shap_values,
             X_test,
