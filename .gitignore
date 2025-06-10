@@ -4,6 +4,7 @@ processed/
 hp/
 feature_attention_tuner/
 lstm_attention_tuner/
+lstm_only_tuner/
 
 # Ignore Python cache files
 __pycache__/
