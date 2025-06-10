@@ -1,6 +1,6 @@
 # evaluation.py
 """
-Shared evaluation helpers – ROC‑AUC, threshold sweep, nice console prints.
+Shared evaluation helpers – ROC-AUC, threshold sweep, nice console prints.
 """
 import numpy as np
 from sklearn.metrics import roc_auc_score, confusion_matrix
@@ -10,7 +10,7 @@ def threshold_sweep(y_true, y_prob, step: float = 0.01):
     thresholds = np.arange(0, 1.0 + step, step)
     best = {"thr": 0, "sens": 0, "spec": 0, "youden": -1}
 
-    print("\n🔹 Threshold‑wise Sens / Spec / Youden")
+    print("\n🔹 Threshold-wise Sens / Spec / Youden")
     for t in thresholds:
         tn, fp, fn, tp = confusion_matrix(
             y_true, (y_prob >= t).astype(int)

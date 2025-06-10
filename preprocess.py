@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import List, Tuple, Union
 
 import pandas as pd
+import numpy as np
 
 ###############################################################################
 # ──────────────────────────────  Core logic  ──────────────────────────────── #
@@ -217,6 +218,26 @@ def process_participant(
         df["datetime_local"].diff().dt.total_seconds() / 60
     )
     df["time_since_last_BP_spike"].ffill(inplace=True)
+
+    # ─────────────── NEW FEATURES BEGIN HERE ───────────────
+    # 1) Additional rolling‐std windows on HR (std of hr_std_10min)
+    if "hr_std_10min" in df.columns:
+        df["hr_std_rolling_5"]  = df["hr_std_10min"].rolling(5).std()
+        df["hr_std_rolling_10"] = df["hr_std_10min"].rolling(10).std()
+
+    # 2) Additional rolling‐mean windows on steps (mean of steps_total_30min)
+    if "steps_total_30min" in df.columns:
+        df["steps_total_rolling_10"] = df["steps_total_30min"].rolling(10).mean()
+        df["steps_total_rolling_20"] = df["steps_total_30min"].rolling(20).mean()
+
+    # 3) Cyclic encoding of hour_of_day
+    #    (so that 23 and 0 are “close” rather than far apart)
+    df["sin_hour"] = np.sin(2 * np.pi * df["hour_of_day"] / 24.0)
+    df["cos_hour"] = np.cos(2 * np.pi * df["hour_of_day"] / 24.0)
+
+    # 4) “Recent‐spike” flag: 1 if last spike was <10 minutes ago
+    df["recent_spike_flag"] = (df["time_since_last_BP_spike"] < 10).astype(int)
+    # ─────────────── NEW FEATURES END HERE ───────────────
 
     # ─────────────── Fill gaps & save ───────────────
     df.ffill(inplace=True)
